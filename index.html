@@ -206,7 +206,7 @@
     document.getElementById('n-free').textContent = d.total - rows.length;
     clockEl.textContent = new Date(d.t).toLocaleTimeString('zh-CN', { hour12: false });
 
-    // 7) 下方清单：内容没变就不重建，避免每 2 秒闪一次。
+    // 7) 下方清单：内容没变就不重建，避免每秒闪一次。
     //    能打开的端口做成真链接，中键/右键另存等浏览器原生行为也能用。
     const listenRows = rows.filter(r => r[1] === 1);
     const sig = listenRows.map(r => r.join('\u0001')).join('\u0002');
@@ -289,7 +289,7 @@
       liveEl.classList.add('bad');
       clockEl.textContent = '服务已断开，重试中…';
     }
-    setTimeout(tick, 2000);
+    setTimeout(tick, 1000);
   }
 
   let rt;
