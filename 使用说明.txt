@@ -39,6 +39,47 @@
   窗口调宽调窄时，格子大小会自动保持在 12 像素左右，不会变得看不清。
 
 
+【点一下就能打开那个服务】（新）
+  对着【蓝色】的方块点一下，浏览器会新开一个标签页打开
+       http://127.0.0.1:端口号/
+  鼠标移过去时指针会变成小手，说明这一格可以点。
+
+  下方表格里「端口」那一列也是链接，点数字效果一样，
+  还支持右键「在新标签页打开」、复制链接等浏览器原生操作。
+
+  几点说明：
+    · 只有蓝色（TCP 正在监听）能点 —— 橙色的临时端口和 UDP 端口上面没有网页
+    · 少数服务用的是 https，或者根本不是网页（比如数据库 3306），
+      点开后会看到连接失败或一堆乱码，这是正常的，不是监控坏了
+    · 只是想看看端口信息就别点，鼠标悬停就够了
+
+
+【想让它开机自动运行】（可选）
+  文件夹里的「静默启动.vbs」可以在后台悄悄启动服务，不弹任何窗口。
+  双击它就能试一次；要真正开机自启，用下面任意一种办法：
+
+    办法一：把「静默启动.vbs」的快捷方式放进启动文件夹
+      按 Win+R，输入  shell:startup  回车，把快捷方式拖进去即可。
+
+    办法二：注册一个登录时触发的计划任务
+      开始菜单搜索 PowerShell → 右键以管理员身份运行，粘贴执行：
+
+        $vbs = "这里换成静默启动.vbs的完整路径"
+        $act = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbs`""
+        $trg = New-ScheduledTaskTrigger -AtLogOn
+        $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
+        Register-ScheduledTask -TaskName 'PortMonitor-AutoStart' `
+            -Action $act -Trigger $trg -Settings $set -Force
+
+      取消自启：  Unregister-ScheduledTask -TaskName 'PortMonitor-AutoStart'
+
+  开机自启不会自动弹浏览器（不然每次开机都跳一个页面太吵），
+  想看的时候自己打开  http://127.0.0.1:8777 就行。
+
+  另外：自启已经在跑的时候，再双击「启动.cmd」不会起第二个副本，
+  它只会帮你把页面打开。
+
+
 【几个常见问题】
 
   问：这个会不会被别人从外部连进来？
@@ -60,7 +101,8 @@
 
 
 【文件说明】
-  启动.cmd       ← 双击这个就行
-  server.ps1     ← 服务端程序（不用管）
-  index.html     ← 监控页面（不用管）
-  使用说明.txt   ← 本文件
+  启动.cmd        ← 双击这个就行
+  静默启动.vbs     ← 后台静默启动（不弹窗），给开机自启用
+  server.ps1      ← 服务端程序（不用管）
+  index.html      ← 监控页面（不用管）
+  使用说明.txt     ← 本文件

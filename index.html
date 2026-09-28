@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>端口实时监控</title>
+<!-- 图标用内联 SVG，不额外引入文件；样式就是页面里的 3×3 端口网格 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111827'/%3E%3Cg fill='%23374151'%3E%3Crect x='13' y='5' width='6' height='6' rx='1.5'/%3E%3Crect x='21' y='5' width='6' height='6' rx='1.5'/%3E%3Crect x='5' y='13' width='6' height='6' rx='1.5'/%3E%3Crect x='21' y='13' width='6' height='6' rx='1.5'/%3E%3Crect x='5' y='21' width='6' height='6' rx='1.5'/%3E%3Crect x='21' y='21' width='6' height='6' rx='1.5'/%3E%3C/g%3E%3Crect x='5' y='5' width='6' height='6' rx='1.5' fill='%233b82f6'/%3E%3Crect x='13' y='21' width='6' height='6' rx='1.5' fill='%233b82f6'/%3E%3Crect x='13' y='13' width='6' height='6' rx='1.5' fill='%23f59e0b'/%3E%3C/svg%3E">
 <style>
   :root{
     --free:#e8eaed;
@@ -19,7 +21,8 @@
     font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
     -webkit-font-smoothing:antialiased;
   }
-  h1{font-size:15px;font-weight:650;margin:0;letter-spacing:.2px}
+  h1{font-size:15px;font-weight:650;margin:0;letter-spacing:.2px;display:inline-flex;align-items:center;gap:7px}
+  .logo{width:19px;height:19px;display:block;flex:none}
   .bar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin:0 0 14px}
   .stat{color:var(--muted);font-variant-numeric:tabular-nums}
   .stat b{color:var(--fg);font-weight:600}
@@ -40,6 +43,9 @@
   th{color:var(--muted);font-size:12px}
   td.p{width:76px;color:var(--listen);font-weight:600}
   td.s{width:170px;color:var(--muted);font-size:12px}
+  tr.openable td.p a{color:var(--listen);text-decoration:none}
+  tr.openable td.p a:hover{text-decoration:underline}
+  tr.openable td.p a::after{content:" \2197";font-size:11px;color:#9ca3af}
   .empty{color:var(--muted);padding:8px 0}
   #tip{
     position:fixed;z-index:20;pointer-events:none;display:none;
@@ -49,12 +55,13 @@
   }
   #tip b{font-weight:650}
   #tip .k{color:#9ca3af}
+  #tip .go{color:#7dd3fc}
 </style>
 </head>
 <body>
 
 <div class="bar">
-  <h1>端口实时监控</h1>
+  <h1><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#111827"/><g fill="#374151"><rect x="13" y="5" width="6" height="6" rx="1.5"/><rect x="21" y="5" width="6" height="6" rx="1.5"/><rect x="5" y="13" width="6" height="6" rx="1.5"/><rect x="21" y="13" width="6" height="6" rx="1.5"/><rect x="5" y="21" width="6" height="6" rx="1.5"/><rect x="21" y="21" width="6" height="6" rx="1.5"/></g><rect x="5" y="5" width="6" height="6" rx="1.5" fill="#3b82f6"/><rect x="13" y="21" width="6" height="6" rx="1.5" fill="#3b82f6"/><rect x="13" y="13" width="6" height="6" rx="1.5" fill="#f59e0b"/></svg>端口实时监控</h1>
   <span class="stat"><span class="dot" id="live"></span><span id="clock">连接中…</span></span>
   <span class="stat b">监听中 <b id="n-listen">–</b></span>
   <span class="stat c">连接占用 <b id="n-conn">–</b></span>
@@ -62,7 +69,7 @@
 </div>
 
 <div class="legend">
-  <span><i class="sw" style="background:var(--listen)"></i>监听中（在提供服务）</span>
+  <span><i class="sw" style="background:var(--listen)"></i>监听中（点击可在浏览器打开）</span>
   <span><i class="sw" style="background:var(--conn)"></i>连接占用（临时端口）</span>
   <span><i class="sw" style="background:var(--free)"></i>空闲</span>
   <span class="hint">鼠标悬停查看端口详情</span>
@@ -84,7 +91,7 @@
   //
   // 列数不写死：由「目标格子尺寸」反推列数，再把格子摊满可用宽度。
   // 这样格子大小始终在 12px 上下，不会因为写死 64 / 128 列而在
-  // 「太大」和「太小」两个极端之间跳。
+  // 「太大」和「太小」之间跳。
   //
   // 画布按【设备像素】整数绘制，不用 ctx.scale 做小数缩放：
   // 每根白线都是整数个物理像素，所有行的间隔宽度严格一致。
@@ -115,6 +122,10 @@
   const colOf = p => p % COLS;
   // 最后一行可能不满，不能多画不存在的端口
   const cellsInRow = r => Math.min(COLS, TOTAL - r * COLS);
+
+  // 只有 TCP 正在监听的端口才谈得上「用浏览器打开」：
+  // UDP 端口上没有 HTTP 服务，橙色的是本机连出去的临时端口，两者都不是网页。
+  const isOpenable = info => !!info && info[1] === 1 && String(info[3]).indexOf('LISTENING') >= 0;
 
   // ---------------------------------------------------------------- 尺寸
   function layout() {
@@ -195,35 +206,54 @@
     document.getElementById('n-free').textContent = d.total - rows.length;
     clockEl.textContent = new Date(d.t).toLocaleTimeString('zh-CN', { hour12: false });
 
-    // 7) 下方清单：内容没变就不重建，避免每 2 秒闪一次
+    // 7) 下方清单：内容没变就不重建，避免每 2 秒闪一次。
+    //    能打开的端口做成真链接，中键/右键另存等浏览器原生行为也能用。
     const listenRows = rows.filter(r => r[1] === 1);
     const sig = listenRows.map(r => r.join('\u0001')).join('\u0002');
     if (sig !== lastListSig) {
       lastListSig = sig;
       listEl.innerHTML = listenRows.length
-        ? listenRows.map(r => `<tr><td class="p">${r[0]}</td><td>${esc(r[2])}</td><td class="s">${esc(r[3])}</td></tr>`).join('')
+        ? listenRows.map(r => {
+            const canOpen = isOpenable(r);
+            const p = canOpen
+              ? `<a href="http://127.0.0.1:${r[0]}/" target="_blank" rel="noopener">${r[0]}</a>`
+              : String(r[0]);
+            return `<tr class="${canOpen ? 'openable' : ''}"><td class="p">${p}</td><td>${esc(r[2])}</td><td class="s">${esc(r[3])}</td></tr>`;
+          }).join('')
         : '<tr><td colspan="3" class="empty">暂无监听中的端口</td></tr>';
       document.getElementById('list-count').textContent = `共 ${listenRows.length} 个`;
     }
   }
 
-  // ---------------------------------------------------------------- 悬停提示
-  canvas.addEventListener('mousemove', ev => {
+  // ---------------------------------------------------------------- 坐标换算
+  // 把鼠标事件换算成端口号；落在网格外或越界返回 -1
+  function portAt(ev) {
     const rect = canvas.getBoundingClientRect();
     const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
     const x = (ev.clientX - rect.left) * sx - gutter;
     const y = (ev.clientY - rect.top)  * sy - top;
     const c = Math.floor(x / pitch), r = Math.floor(y / pitch);
+    if (x < 0 || y < 0 || c >= COLS || r >= ROWS) return -1;
     const port = r * COLS + c;
-    if (x < 0 || y < 0 || c >= COLS || r >= ROWS || port >= TOTAL) { tip.style.display = 'none'; return; }
+    return port < TOTAL ? port : -1;
+  }
+
+  // ---------------------------------------------------------------- 悬停提示
+  canvas.addEventListener('mousemove', ev => {
+    const port = portAt(ev);
+    if (port < 0) { tip.style.display = 'none'; return; }
 
     const info = infoByPort.get(port);
+    const canOpen = isOpenable(info);
+    canvas.style.cursor = canOpen ? 'pointer' : 'crosshair';
+
     let html = `<b>端口 ${port}</b>`;
     if (info) {
       const isListen = info[1] === 1;
       html += `<br><span style="color:${isListen ? LISTEN : CONN}">●</span> ${isListen ? '监听中（在提供服务）' : '连接占用（临时端口）'}`
            +  `<br><span class="k">进程</span> ${esc(info[2])}`
            +  `<br><span class="k">状态</span> ${esc(info[3])}`;
+      if (canOpen) html += `<br><span class="go">↗ 点击在浏览器中打开</span>`;
     } else {
       html += `<br><span class="k">空闲</span>`;
     }
@@ -233,7 +263,19 @@
     tip.style.left = Math.min(ev.clientX + 14, innerWidth - w - 8) + 'px';
     tip.style.top  = Math.min(ev.clientY + 14, innerHeight - h - 8) + 'px';
   });
-  canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+  canvas.addEventListener('mouseleave', () => {
+    tip.style.display = 'none';
+    canvas.style.cursor = 'crosshair';
+  });
+
+  // ---------------------------------------------------------------- 点击打开
+  // 点蓝色（TCP 监听中）的格子 → 新标签页打开 http://127.0.0.1:端口/
+  canvas.addEventListener('click', ev => {
+    const port = portAt(ev);
+    if (port < 0) return;
+    if (!isOpenable(infoByPort.get(port))) return;
+    window.open(`http://127.0.0.1:${port}/`, '_blank', 'noopener');
+  });
 
   // ---------------------------------------------------------------- 轮询
   async function tick() {
