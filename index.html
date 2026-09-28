@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>端口实时监控</title>
+<style>
+  :root{
+    --free:#e8eaed;
+    --listen:#2563eb;
+    --conn:#f59e0b;
+    --muted:#6b7280;
+    --fg:#111827;
+    --line:#eceef1;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:18px 22px 60px;background:#fff;color:var(--fg);
+    font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1{font-size:15px;font-weight:650;margin:0;letter-spacing:.2px}
+  .bar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin:0 0 14px}
+  .stat{color:var(--muted);font-variant-numeric:tabular-nums}
+  .stat b{color:var(--fg);font-weight:600}
+  .stat.b b{color:var(--listen)}
+  .stat.c b{color:#c2740a}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#22c55e;margin-right:6px;vertical-align:1px}
+  .dot.bad{background:#ef4444}
+  .legend{display:flex;gap:18px;color:var(--muted);margin-bottom:10px;flex-wrap:wrap}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .hint{color:#9ca3af;margin-left:auto}
+  .mapwrap{overflow-x:hidden;border:1px solid var(--line);border-radius:8px;padding:8px;background:#fff}
+  canvas{display:block;cursor:crosshair}
+  h2{font-size:13px;font-weight:600;margin:24px 0 8px}
+  h2 small{font-weight:400;color:var(--muted);margin-left:8px}
+  table{border-collapse:collapse;width:100%;max-width:820px;font-variant-numeric:tabular-nums}
+  th,td{text-align:left;padding:3px 12px 3px 0;border-bottom:1px solid var(--line);font-weight:400}
+  th{color:var(--muted);font-size:12px}
+  td.p{width:76px;color:var(--listen);font-weight:600}
+  td.s{width:170px;color:var(--muted);font-size:12px}
+  .empty{color:var(--muted);padding:8px 0}
+  #tip{
+    position:fixed;z-index:20;pointer-events:none;display:none;
+    background:#111827;color:#fff;padding:7px 10px;border-radius:7px;
+    font-size:12px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,.18);
+    font-variant-numeric:tabular-nums;white-space:nowrap;
+  }
+  #tip b{font-weight:650}
+  #tip .k{color:#9ca3af}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <h1>端口实时监控</h1>
+  <span class="stat"><span class="dot" id="live"></span><span id="clock">连接中…</span></span>
+  <span class="stat b">监听中 <b id="n-listen">–</b></span>
+  <span class="stat c">连接占用 <b id="n-conn">–</b></span>
+  <span class="stat">空闲 <b id="n-free">–</b></span>
+</div>
+
+<div class="legend">
+  <span><i class="sw" style="background:var(--listen)"></i>监听中（在提供服务）</span>
+  <span><i class="sw" style="background:var(--conn)"></i>连接占用（临时端口）</span>
+  <span><i class="sw" style="background:var(--free)"></i>空闲</span>
+  <span class="hint">鼠标悬停查看端口详情</span>
+</div>
+
+<div class="mapwrap"><canvas id="map"></canvas></div>
+
+<h2>监听中的端口 <small id="list-count"></small></h2>
+<table>
+  <thead><tr><th>端口</th><th>进程</th><th>协议 / 状态</th></tr></thead>
+  <tbody id="list"></tbody>
+</table>
+
+<div id="tip"></div>
+
+<script>
+(() => {
+  // 覆盖 0–65535 全部端口，一格 = 一个端口。
+  //
+  // 列数不写死：由「目标格子尺寸」反推列数，再把格子摊满可用宽度。
+  // 这样格子大小始终在 12px 上下，不会因为写死 64 / 128 列而在
+  // 「太大」和「太小」两个极端之间跳。
+  //
+  // 画布按【设备像素】整数绘制，不用 ctx.scale 做小数缩放：
+  // 每根白线都是整数个物理像素，所有行的间隔宽度严格一致。
+  const TOTAL = 65536;
+  const TARGET_PITCH_CSS = 13;         // 目标：格子 12px + 缝 1px
+  const MIN_PITCH_CSS = 9;             // 窗口极窄时的下限
+  const GUTTER_CSS = 72, TOP_CSS = 22; // 左侧刻度栏 / 顶部留白
+  const LABEL_EVERY = 8;               // 每 8 行标一次刻度
+
+  const FREE = '#e8eaed', LISTEN = '#2563eb', CONN = '#f59e0b', LINE = '#ffffff';
+
+  const canvas = document.getElementById('map');
+  const parent = canvas.parentElement;
+  const ctx = canvas.getContext('2d');
+  const tip = document.getElementById('tip');
+  const listEl = document.getElementById('list');
+  const clockEl = document.getElementById('clock');
+  const liveEl = document.getElementById('live');
+
+  // 以下长度单位全部是【设备像素】
+  let COLS, ROWS, dpr, line, cell, pitch, gutter, top, wDev, hDev;
+
+  let lastData = null, lastListSig = '';
+  const infoByPort = new Map();        // 端口号 -> [端口, 类型, 进程, 状态]
+
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const rowOf = p => Math.floor(p / COLS);
+  const colOf = p => p % COLS;
+  // 最后一行可能不满，不能多画不存在的端口
+  const cellsInRow = r => Math.min(COLS, TOTAL - r * COLS);
+
+  // ---------------------------------------------------------------- 尺寸
+  function layout() {
+    dpr  = Math.min(window.devicePixelRatio || 1, 3);
+    line = Math.max(1, Math.round(dpr));                  // 白线宽 ≈ 1 CSS px
+    gutter = Math.round(GUTTER_CSS * dpr);
+    top    = Math.round(TOP_CSS * dpr);
+
+    const wrapCss = parent.clientWidth || document.documentElement.clientWidth;
+    const availCss = Math.max(240, wrapCss - 16);         // 减掉 .mapwrap 的内边距
+    const availDev = availCss * dpr - gutter;
+
+    // 先按目标格子尺寸算出「理想间距」，再取 8 的倍数定列数。
+    // 用 floor 而不是 round：这样摊满后每格正好落在目标尺寸上，不会偏小。
+    const targetPitchDev = Math.round(TARGET_PITCH_CSS * dpr);
+    COLS = Math.max(8, Math.floor(availDev / targetPitchDev / 8) * 8);
+    ROWS = Math.ceil(TOTAL / COLS);
+
+    pitch = Math.max(Math.round(MIN_PITCH_CSS * dpr), Math.floor(availDev / COLS));
+    cell  = pitch - line;
+
+    wDev = gutter + COLS * pitch;
+    hDev = top    + ROWS * pitch;
+
+    canvas.width  = wDev;
+    canvas.height = hDev;
+    canvas.style.width  = (wDev / dpr) + 'px';
+    canvas.style.height = (hDev / dpr) + 'px';
+
+    if (lastData) paint(lastData);
+  }
+
+  // ---------------------------------------------------------------- 绘制
+  function paint(d) {
+    const rows = d.rows || [];
+
+    // 1) 整块铺白 —— 缝隙就是靠它显出来的
+    ctx.fillStyle = LINE;
+    ctx.fillRect(0, 0, wDev, hDev);
+
+    // 2) 灰色格子：一行画一条横带；带与带之间留 line 像素 = 横向细线
+    ctx.fillStyle = FREE;
+    for (let r = 0; r < ROWS; r++) {
+      ctx.fillRect(gutter, top + r * pitch, cellsInRow(r) * pitch, cell);
+    }
+
+    // 3) 竖向细线：把每条横带切成一个个独立格子
+    //    （末行不满的部分底面是白的，线画上去自然看不见，不用特殊处理）
+    ctx.fillStyle = LINE;
+    for (let c = 1; c < COLS; c++) {
+      ctx.fillRect(gutter + c * pitch - line, top, line, ROWS * pitch);
+    }
+
+    // 4) 左侧刻度
+    ctx.font = Math.round(11 * dpr) + 'px ui-monospace,Consolas,monospace';
+    ctx.fillStyle = '#9ca3af';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('端口号', gutter - Math.round(7 * dpr), top - Math.round(8 * dpr));
+    for (let r = 0; r < ROWS; r += LABEL_EVERY) {
+      ctx.fillText(String(r * COLS), gutter - Math.round(7 * dpr), top + r * pitch + cell / 2);
+    }
+
+    // 5) 已占用的端口，各自涂成一格
+    infoByPort.clear();
+    let nListen = 0, nConn = 0;
+    for (const row of rows) {
+      const port = row[0], kind = row[1];
+      infoByPort.set(port, row);
+      if (kind === 1) nListen++; else nConn++;
+      ctx.fillStyle = kind === 1 ? LISTEN : CONN;
+      ctx.fillRect(gutter + colOf(port) * pitch, top + rowOf(port) * pitch, cell, cell);
+    }
+
+    // 6) 顶部统计
+    document.getElementById('n-listen').textContent = nListen;
+    document.getElementById('n-conn').textContent = nConn;
+    document.getElementById('n-free').textContent = d.total - rows.length;
+    clockEl.textContent = new Date(d.t).toLocaleTimeString('zh-CN', { hour12: false });
+
+    // 7) 下方清单：内容没变就不重建，避免每 2 秒闪一次
+    const listenRows = rows.filter(r => r[1] === 1);
+    const sig = listenRows.map(r => r.join('\u0001')).join('\u0002');
+    if (sig !== lastListSig) {
+      lastListSig = sig;
+      listEl.innerHTML = listenRows.length
+        ? listenRows.map(r => `<tr><td class="p">${r[0]}</td><td>${esc(r[2])}</td><td class="s">${esc(r[3])}</td></tr>`).join('')
+        : '<tr><td colspan="3" class="empty">暂无监听中的端口</td></tr>';
+      document.getElementById('list-count').textContent = `共 ${listenRows.length} 个`;
+    }
+  }
+
+  // ---------------------------------------------------------------- 悬停提示
+  canvas.addEventListener('mousemove', ev => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+    const x = (ev.clientX - rect.left) * sx - gutter;
+    const y = (ev.clientY - rect.top)  * sy - top;
+    const c = Math.floor(x / pitch), r = Math.floor(y / pitch);
+    const port = r * COLS + c;
+    if (x < 0 || y < 0 || c >= COLS || r >= ROWS || port >= TOTAL) { tip.style.display = 'none'; return; }
+
+    const info = infoByPort.get(port);
+    let html = `<b>端口 ${port}</b>`;
+    if (info) {
+      const isListen = info[1] === 1;
+      html += `<br><span style="color:${isListen ? LISTEN : CONN}">●</span> ${isListen ? '监听中（在提供服务）' : '连接占用（临时端口）'}`
+           +  `<br><span class="k">进程</span> ${esc(info[2])}`
+           +  `<br><span class="k">状态</span> ${esc(info[3])}`;
+    } else {
+      html += `<br><span class="k">空闲</span>`;
+    }
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - w - 8) + 'px';
+    tip.style.top  = Math.min(ev.clientY + 14, innerHeight - h - 8) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+
+  // ---------------------------------------------------------------- 轮询
+  async function tick() {
+    try {
+      const res = await fetch('/api/ports', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      lastData = await res.json();
+      paint(lastData);
+      liveEl.classList.remove('bad');
+    } catch (e) {
+      liveEl.classList.add('bad');
+      clockEl.textContent = '服务已断开，重试中…';
+    }
+    setTimeout(tick, 2000);
+  }
+
+  let rt;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(layout, 150); });
+
+  layout();
+  tick();
+})();
+</script>
+</body>
+</html>

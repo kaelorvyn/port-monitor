@@ -1,0 +1,6 @@
+# 本地测试残留
+_verify.png
+_test.ps1
+
+# 打包产物：成品发到 Releases，不进仓库
+*.zip
